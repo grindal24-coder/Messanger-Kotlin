@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.HLZ" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">#0f1115</item>
+        <item name="android:statusBarColor">#0f1115</item>
+        <item name="android:navigationBarColor">#0f1115</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
