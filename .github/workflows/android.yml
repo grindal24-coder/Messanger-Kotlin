@@ -1,0 +1,110 @@
+name: Сборка APK
+
+# Собирает APK на серверах GitHub (Android Studio не нужен).
+# - при каждом push в main/master и в pull request;
+# - при push тега вида v1.0 — дополнительно создаёт Release с APK (нужно для автообновления в приложении);
+# - можно запустить вручную: вкладка Actions → «Сборка APK» → Run workflow.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle с кэшем
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Сделать gradlew исполняемым
+        run: chmod +x ./gradlew
+
+      - name: Проверить Android SDK 34
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          if [ ! -d "$ANDROID_HOME/platforms/android-34" ]; then
+            SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            if [ ! -x "$SDKM" ]; then SDKM="$(command -v sdkmanager)"; fi
+            yes | "$SDKM" --licenses > /dev/null || true
+            "$SDKM" "platforms;android-34" "build-tools;34.0.0"
+          fi
+
+      - name: Подготовить ключ подписи
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Ключ подписи найден: APK будет подписан вашим релизным ключом."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Секрет ANDROID_KEYSTORE_BASE64 не задан. APK соберётся, но подпишется отладочным ключом — обновиться поверх такого файла не получится."
+          fi
+
+      - name: Собрать APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Выбрать готовый файл
+        id: apk
+        run: |
+          set -e
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then echo "APK не найден"; exit 1; fi
+          NAME="HLZ-${GITHUB_REF_NAME//\//_}.apk"
+          mkdir -p dist
+          cp "$APK" "dist/$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh dist
+
+      - name: Отдать APK артефактом
+        uses: actions/upload-artifact@v4
+        with:
+          name: HLZ-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Создать Release (только для тега v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.apk --clobber
+          else
+            gh release create "$TAG" dist/*.apk --title "$TAG" --generate-notes
+          fi
+
+      - name: Итог запуска
+        run: |
+          {
+            echo "### HLZ APK готов"
+            echo ""
+            echo "- Файл: \`${{ steps.apk.outputs.name }}\`"
+            echo "- Подпись: ${{ steps.key.outputs.signed == 'true' && 'релизный ключ' || 'отладочный ключ (секреты не заданы)' }}"
+            echo "- Скачать: **Actions** → этот запуск → **Artifacts** → **HLZ-apk**"
+          } >> "$GITHUB_STEP_SUMMARY"
