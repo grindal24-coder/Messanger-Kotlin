@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services") // Firebase Cloud Messaging (файл app/google-services.json)
 }
 
 // ── Подпись APK ───────────────────────────────────────────────────────────────
@@ -33,8 +34,8 @@ android {
         applicationId = "app.hlz"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1        // при каждом обновлении увеличивай на 1
-        versionName = "1.0"    // и меняй номер версии (он должен совпадать с тегом релиза на GitHub: v1.0, v1.1 ...)
+        versionCode = 5        // при каждом обновлении увеличивай на 1
+        versionName = "1.4"    // и меняй номер версии (он должен совпадать с тегом релиза на GitHub: v1.0, v1.1 ...)
     }
 
     signingConfigs {
@@ -80,4 +81,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 }

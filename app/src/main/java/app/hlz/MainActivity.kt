@@ -4,6 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.NotificationManager
 import android.app.PictureInPictureParams
+import android.app.job.JobInfo
+import android.app.job.JobScheduler
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -31,6 +34,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -100,10 +104,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         askPerms()
-        ListenService.startIfNeeded(this) // если ключ уведомлений уже есть, служба приёма запускается сразу
+        schedulePoll()
+        initFcm()
 
         val chat = intent.getStringExtra("chat")
-        web.loadUrl(Config.APP_URL + if (chat != null) "#c=$chat" else "")
+        val hash = buildString {
+            if (chat != null) append("c=").append(chat)
+            if (intent.getBooleanExtra("decline", false)) {
+                if (isNotEmpty()) append('&')
+                append("d=1")
+            }
+            if (intent.getBooleanExtra("accept", false)) {
+                if (isNotEmpty()) append('&')
+                append("a=1")
+            }
+        }
+        web.loadUrl(Config.APP_URL + if (hash.isNotEmpty()) "#$hash" else "")
         Updater.check(this, manual = false)
     }
 
@@ -122,9 +138,18 @@ class MainActivity : AppCompatActivity() {
             val safe = c.filter { it.isLetterOrDigit() || it == '-' }
             web.evaluateJavascript("window.hlzOpen&&hlzOpen('$safe')", null)
         }
+        // действие «Отклонить» в уведомлении о звонке
+        if (intent.getBooleanExtra("decline", false)) {
+            web.evaluateJavascript("window.hlzDecline&&hlzDecline()", null)
+        }
+        // действие «Принять» в уведомлении о звонке
+        if (intent.getBooleanExtra("accept", false)) {
+            web.evaluateJavascript("window.hlzAccept&&hlzAccept()", null)
+        }
     }
 
-    override fun onStart() { super.onStart(); visible = true }
+    override fun onStart() { super.onStart(); visible = true; Ring.stop(); Notif.cancelCall(this) } // приложение открыли — звонить перестаём
+    override fun onResume() { super.onResume(); Ring.stop(); Notif.cancelCall(this) }
     override fun onStop() {
         super.onStop(); visible = false
         setShowWhenLocked(false); setTurnScreenOn(false) // обычный режим: на экране блокировки приложение не показывается
@@ -135,6 +160,33 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33) need += Manifest.permission.POST_NOTIFICATIONS
         val miss = need.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (miss.isNotEmpty()) permLauncher.launch(miss.toTypedArray()) else { askBattery(); askFullScreen() }
+    }
+
+    // страховочное задание: раз в ~15 минут забрать очередь уведомлений, даже если службу убили
+    private fun schedulePoll() {
+        try {
+            val js = getSystemService(JobScheduler::class.java) ?: return
+            val job = JobInfo.Builder(7081, ComponentName(this, PollJob::class.java))
+                .setPeriodic(15 * 60 * 1000L)
+                .setPersisted(true)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .build()
+            js.schedule(job)
+        } catch (_: Exception) {}
+    }
+
+    // токен Firebase: по нему сервер будит телефон, даже если приложение закрыто
+    private fun initFcm() {
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        task.result?.let {
+                            getSharedPreferences("hlz", 0).edit().putString("fcmToken", it).apply()
+                        }
+                    }
+                }
+        } catch (_: Exception) {}
     }
 
     // один раз просим не ограничивать приложение в фоне (иначе оболочки вроде MIUI «убивают» уведомления)
@@ -174,6 +226,7 @@ class MainActivity : AppCompatActivity() {
     // ---- звонок: служба переднего плана держит микрофон/камеру при погашенном экране; окно-картинка при выходе ----
     fun setCall(on: Boolean) {
         inCall = on
+        Ring.stop() // телефон больше не звонит: звонок начался или закончился
         val i = Intent(this, CallService::class.java)
         try {
             if (on) ContextCompat.startForegroundService(this, i) else stopService(i)
@@ -211,8 +264,67 @@ class MainActivity : AppCompatActivity() {
         // страница передаёт личный ключ канала уведомлений (пустой — выключить приём)
         @JavascriptInterface fun notifKey(k: String) {
             a.getSharedPreferences("hlz", 0).edit().putString("notifKey", k).apply()
+        }
+
+        // токен Firebase для push-уведомлений (его страница отправляет в базу)
+        @JavascriptInterface fun fcmToken(): String =
+            a.getSharedPreferences("hlz", 0).getString("fcmToken", "") ?: ""
+
+        // состояние приёма уведомлений — показывается на экране «Проверить уведомления»
+        @JavascriptInterface fun status(): String {
+            val key = a.getSharedPreferences("hlz", 0).getString("notifKey", "") ?: ""
+            val nm = a.getSystemService(NotificationManager::class.java)
+            val canPost = Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(a, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            val fs = Build.VERSION.SDK_INT < 34 || nm.canUseFullScreenIntent()
+            val fcm = a.getSharedPreferences("hlz", 0).getString("fcmToken", "") ?: ""
+            return JSONObject()
+                .put("key", key.length)
+                .put("fcm", fcm.length)
+                .put("log", a.getSharedPreferences("hlz", 0).getString("svcLog", "") ?: "")
+                .put("notif", canPost)
+                .put("fullscreen", fs)
+                .put("version", BuildConfig.VERSION_NAME)
+                .toString()
+        }
+
+        // локальная проверка: показать уведомление, не обращаясь к серверу
+        @JavascriptInterface fun testNotif(title: String, body: String) {
             a.runOnUiThread {
-                if (k.isEmpty()) a.stopService(Intent(a, ListenService::class.java)) else ListenService.startIfNeeded(a)
+                try { Notif.show(a, title, body, null, "test", false) } catch (_: Exception) {}
+            }
+        }
+
+        // запросить разрешение на уведомления (или открыть их настройки, если уже выдано/запрещено)
+        @JavascriptInterface fun requestNotif() {
+            a.runOnUiThread {
+                val need = Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(a, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                if (need) {
+                    try { a.permLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) } catch (_: Exception) {}
+                } else {
+                    openSettings("app")
+                }
+            }
+        }
+
+        // открыть системные настройки: "fullscreen" | "battery" | "app"
+        @JavascriptInterface fun openSettings(kind: String) {
+            a.runOnUiThread {
+                try {
+                    when (kind) {
+                        "fullscreen" ->
+                            if (Build.VERSION.SDK_INT >= 34) {
+                                a.startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${a.packageName}")))
+                            } else {
+                                a.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, a.packageName))
+                            }
+                        "battery" ->
+                            a.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${a.packageName}")))
+                        else ->
+                            a.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, a.packageName))
+                    }
+                } catch (_: Exception) {}
             }
         }
 

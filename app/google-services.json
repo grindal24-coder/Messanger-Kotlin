@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "954417156080",
+    "project_id": "messanger-hlz",
+    "storage_bucket": "messanger-hlz.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:954417156080:android:291c3a0bdd4b9b81909735",
+        "android_client_info": {
+          "package_name": "app.hlz"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCRklNmvfbl5TZqgXqarrv2ZePwmEpuVf4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
